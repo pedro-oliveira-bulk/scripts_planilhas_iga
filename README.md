@@ -3,7 +3,7 @@
 
 ## 1- Ir no Apps Script da biblioteca principal  e copiar o ID dela (a biblioteca já foi implementada)
 
-* 1J8TBP-IxMVu6dlh0ZJs_culjuVBjU6SVI1Sh23TOVoNsxrokkeQePeBG
+* ID da biblioteca: 1J8TBP-IxMVu6dlh0ZJs_culjuVBjU6SVI1Sh23TOVoNsxrokkeQePeBG
   
 <img width="1920" height="1080" alt="id_principal_library" src="https://github.com/user-attachments/assets/898596e1-6886-49fa-b8ef-8b84770b05a9" />
 
@@ -11,7 +11,7 @@
 ## 2- Configurando a planilha cliente
 
 * Ir no Apps Script da planilha que você quer colocar a biblioteca
-* Colar o arquivo script_planilha_cliente.txt ou script-cliente-2.txt, IMPORTANTE! LEMBRE DE COLAR O LINK DO FORMS DE CADA PLANILHA E A CONFIG DELE, SÃO ÚNICOS!
+* Colar o arquivo script_planilha_cliente.txt ou script-cliente-2.txt (a diferença de um para outro é somente a CONFIG, mas é recomendado deixar a config da planilha original mesmo), IMPORTANTE! LEMBRE DE COLAR O LINK DO FORMS DE CADA PLANILHA E A CONFIG DELE, SÃO ÚNICOS!
 
 <img width="653" height="32" alt="Captura de tela de 2026-01-14 08-43-39" src="https://github.com/user-attachments/assets/16db892e-0d1b-42bb-b224-75f5129cd382" />
 (exemplo link forms)
