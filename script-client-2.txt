@@ -1,0 +1,46 @@
+function obterConfig() {
+  return {
+    FORM_ID: "link",
+    
+    COLUNAS_FORMULARIO: {
+      TIMESTAMP: 0, 
+      EDUCADOR: 1,
+      SELFIE_TURMA: 2,
+      FOTO_LISTA: 3,
+      DATA_AULA: 4,
+      ALUNOS_PRESENTES: 5, 
+      FOTO_LANCHE: 6,
+      IDS_PRESENTES: 7
+    },
+  
+    
+    ABAS: {
+      LISTA_ALUNOS: "Página1",
+      RESPOSTAS_FORM: "Respostas ao formulário 1", 
+      CORRECOES_MANUAIS: "Correções Manuais"
+    }
+  };
+}
+
+function processamentoDiarioCompletoPresencas() {
+  const CONFIG = obterConfig();
+
+  BibliotecaPresencas.rodarProcessamentoDiario(CONFIG);
+}
+
+function salvarCorrecoes() {
+  Logger.log("[CLIENT] Iniciando salvamento de correções manuais...");
+
+  const CONFIG = obterConfig();
+
+  BibliotecaPresencas.salvarCorrecoesManuaisPresencas(CONFIG, false);
+
+  Logger.log("[CLIENT] Correções manuais salvas");
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("📝 Sistema de Presenças")
+    .addItem("💾 Salvar Correções Manuais", "salvarCorrecoes")
+    .addToUi();
+}

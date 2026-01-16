@@ -1,0 +1,876 @@
+// 🔐 VARIÁVEL GLOBAL para controle de processamento
+var EM_PROCESSAMENTO_AUTOMATICO = false;
+
+// --- FUNÇÕES DE CONTROLE ---
+
+// 🎯 FUNÇÃO PRINCIPAL - PROCESSAMENTO DIÁRIO COMPLETO
+function rodarProcessamentoDiario(CONFIG) {
+    Logger.log("🧪 [LIB] processamentoDiarioCompletoPresencas INICIO");
+    EM_PROCESSAMENTO_AUTOMATICO = true;
+    
+    try {
+        // 1. Traz os dados brutos do formulário
+        sincronizarRespostasFormulario(CONFIG);
+        SpreadsheetApp.flush(); // Aguarda os dados aparecerem na planilha
+        
+        // 2. Extrai os IDs
+        converterRespostasParaIds(CONFIG);
+        SpreadsheetApp.flush(); // Força a gravação dos IDs antes da presença ler
+        
+        // 3. Verificações de status
+        verificarReativacaoStatusPeloManual(CONFIG); 
+        
+        // 4. Marca P e F (Lendo agora da Coluna H, que está protegida)
+        processarPresencasSemLimparManuais(CONFIG);
+        
+        // 5. Sincroniza correções manuais
+        garantirPaginaCorrecoes(CONFIG);
+        aplicarCorrecoesManuaisParaPagina1(CONFIG); 
+        
+        // 6. Atualiza a lista de alunos no formulário para a próxima aula
+        atualizarFormularioPresencas(CONFIG);
+
+        // 7. Estética da presença abonada
+        aplicarFormatacaoAbonada(CONFIG);
+        
+        Logger.log("🎉 PROCESSAMENTO DIÁRIO CONCLUÍDO!");
+    } catch (error) {
+        Logger.log(`❌ Erro: ${error.toString()}`);
+    } finally {
+        EM_PROCESSAMENTO_AUTOMATICO = false;
+        Logger.log("🔚 [LIB] processamentoDiarioCompletoPresencas — FIM");
+    }
+}
+
+// 🎯 CONFIGURAR MENU
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('📝 Sistema de Presenças')
+    .addItem('💾 SALVAR CORREÇÕES MANUAIS', 'menuSalvarCorrecoes')
+    .addToUi();
+}
+
+function menuSalvarCorrecoes() {
+  const CONFIG = obterConfig();
+  salvarCorrecoesManuaisPresencas(CONFIG, false);
+}
+
+
+// --- FUNÇÕES DE PROCESSAMENTO ---
+
+// Aplica formatação condicional para 'A' (Abonada)
+function aplicarFormatacaoAbonada(CONFIG) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+    
+    if (!sheet) return;
+
+    const maxColumns = sheet.getLastColumn();
+    const rangePresencas = sheet.getRange(2, 5, sheet.getLastRow() - 1, maxColumns - 4); 
+
+    const rules = sheet.getConditionalFormatRules();
+    const newRules = [];
+    
+    for (const rule of rules) {
+        try {
+            if (rule && rule.getCriteriaType) { 
+                const criteria = rule.getCriteriaType();
+                const values = rule.getCriteriaValues();
+
+                if (criteria === SpreadsheetApp.BooleanCriteria.TEXT_EQUAL && values.length > 0 && values[0] === "A") {
+                    continue;
+                }
+            }
+        } catch(e) {
+            Logger.log(`⚠️ Ignorando regra de formatação condicional inválida: ${e.message}`);
+            continue; 
+        }
+        
+        // Mantém todas as outras regras (válidas, 'D', 'F', etc.)
+        newRules.push(rule);
+    }
+    
+    // 2. Criação da Regra 'A'
+    const ruleA = SpreadsheetApp.newConditionalFormatRule()
+        .whenTextEqualTo("A")
+        .setBackground("#C9DAF8") 
+        .setRanges([rangePresencas])
+        .build();
+
+    // 3. Aplica o conjunto de regras filtrado + a regra 'A'
+    sheet.setConditionalFormatRules([...newRules, ruleA]);
+    Logger.log("✅ Formatação condicional para 'A' aplicada.");
+}
+
+// 🔄 RECUPERAR STATUS PELO MANUAL
+function verificarReativacaoStatusPeloManual(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const paginaPrincipal = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  const paginaCorrecoes = ss.getSheetByName(CONFIG.ABAS.CORRECOES_MANUAIS);
+
+  if (!paginaCorrecoes) return; 
+
+  const dadosP1 = paginaPrincipal.getDataRange().getValues();
+  const dadosP2 = paginaCorrecoes.getDataRange().getValues();
+
+  // Mapear dados da P2
+  const mapaStatusP2 = new Map();
+  if (dadosP2.length > 1) {
+    for (let i = 1; i < dadosP2.length; i++) {
+      const row = dadosP2[i];
+      const id = String(row[0]).trim();
+      // Coluna D (índice 3) é o Status
+      const status = row[3] ? String(row[3]).trim().toLowerCase() : ""; 
+      if (id) mapaStatusP2.set(id, status);
+    }
+  }
+
+  let recuperados = 0;
+
+  for (let i = 1; i < dadosP1.length; i++) {
+    const row = dadosP1[i];
+    const id = String(row[0]).trim();
+    const statusP1 = row[3] ? String(row[3]).trim().toLowerCase() : "";
+    
+    if (!id) continue;
+
+    const statusP2 = mapaStatusP2.get(id);
+
+    // REGRA: Se P1 diz "Desistente" mas P2 diz "Cursando", P2 vence.
+    if ((statusP1 === "desistente" || statusP1 === "inativo") && 
+        (statusP2 === "cursando" || statusP2 === "ativo")) {
+      
+      // Atualiza P1 para "Cursando" imediatamente
+      paginaPrincipal.getRange(i + 1, 4).setValue("Cursando"); 
+      recuperados++;
+    }
+  }
+  
+  // Força salvar para que as próximas funções já leiam o status novo
+  if (recuperados > 0) SpreadsheetApp.flush(); 
+}
+
+// 📋 GARANTIR E SINCRONIZAR A "PÁGINA 2"
+function garantirPaginaCorrecoes(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const paginaPrincipal = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  let paginaCorrecoes = ss.getSheetByName(CONFIG.ABAS.CORRECOES_MANUAIS);
+
+  if (!paginaCorrecoes) {
+      paginaCorrecoes = ss.insertSheet(CONFIG.ABAS.CORRECOES_MANUAIS);
+      Logger.log(`✅ Aba "${CONFIG.ABAS.CORRECOES_MANUAIS}" criada.`);
+  }
+
+  const dadosP1 = paginaPrincipal.getDataRange().getValues();
+  if (dadosP1.length === 0) return;
+
+  const dadosP2 = paginaCorrecoes.getDataRange().getValues();
+  const timezone = Session.getScriptTimeZone();
+  const normalizeHeader = (h) => h instanceof Date ? Utilities.formatDate(h, timezone, "dd/MM/yyyy") : String(h);
+
+  // 1. Mapear todos os dados e cabeçalhos existentes
+  const cabecalhoP1 = dadosP1[0];
+  const cabecalhoP2 = dadosP2.length > 0 ? dadosP2[0] : [];
+  const mapaCabecalhoP1 = new Map(cabecalhoP1.map((h, i) => [normalizeHeader(h), i]));
+  const mapaCabecalhoP2 = new Map(cabecalhoP2.map((h, i) => [normalizeHeader(h), i]));
+  
+  // Mapear dados da P2 por ID em vez de por posição
+  const mapaDadosP2PorId = new Map();
+  if (dadosP2.length > 1) {
+    for (let i = 1; i < dadosP2.length; i++) {
+      const idAluno = String(dadosP2[i][0]);
+      if (idAluno) {
+        mapaDadosP2PorId.set(idAluno, dadosP2[i]);
+      }
+    }
+  }
+
+  // 2. Construir o cabeçalho mestre para a Página 2, SEM DUPLICATAS
+  const cabecalhoFinalMap = new Map();
+  
+  // Adiciona as 4 colunas base (ID, Nome, Idade, Status)
+  const colunasBase = cabecalhoP1.slice(0, 4);
+  colunasBase.forEach((h, i) => {
+    cabecalhoFinalMap.set(normalizeHeader(h), h);
+  });
+  
+  // Adiciona TODAS as colunas de data (da P1 e P2)
+  const todasColunas = [...cabecalhoP1, ...cabecalhoP2];
+  todasColunas.forEach(h => {
+    const headerStr = normalizeHeader(h);
+    // Só adiciona se não for uma das colunas base (já adicionadas) e se não for duplicata
+    if (!cabecalhoFinalMap.has(headerStr) && 
+        !['id', 'nome', 'idade', 'status'].includes(headerStr.toLowerCase())) {
+      cabecalhoFinalMap.set(headerStr, h);
+    }
+  });
+
+  const cabecalhoFinal = Array.from(cabecalhoFinalMap.values());
+
+  // 3. Construir a nova matriz de dados, garantindo consistência POR ID
+  const novosDadosP2 = [];
+  for (let i = 1; i < dadosP1.length; i++) {
+      const linhaP1 = dadosP1[i];
+      const idAluno = String(linhaP1[0]);
+      if (!idAluno) continue;
+
+      // Busca dados por ID em vez de por posição
+      const linhaAntigaP2 = mapaDadosP2PorId.get(idAluno);
+      const novaLinha = new Array(cabecalhoFinal.length).fill("");
+
+      cabecalhoFinal.forEach((h, j) => {
+        const headerStr = normalizeHeader(h);
+        const indiceAntigoP2 = mapaCabecalhoP2.get(headerStr);
+        const indiceP1 = mapaCabecalhoP1.get(headerStr);
+
+        // REGRA 1: Para colunas de STATUS (índice 3), SEMPRE usar Página 1
+        if (j === 3) { // Coluna D é índice 3 (Status)
+          if (indiceP1 !== undefined && linhaP1[indiceP1] !== undefined) {
+            novaLinha[j] = linhaP1[indiceP1];
+          }
+        }
+        // REGRA 2: Para colunas de DATA (a partir da coluna E, índice 4), priorizar Página 2
+        else if (j >= 4) {
+          // Priorizar correções manuais da Página 2
+          if (linhaAntigaP2 && indiceAntigoP2 !== undefined && linhaAntigaP2[indiceAntigoP2] !== "") {
+              novaLinha[j] = linhaAntigaP2[indiceAntigoP2];
+          } 
+          // Se não há correção, usar valor da Página 1
+          else if (indiceP1 !== undefined && linhaP1[indiceP1] !== undefined) {
+              novaLinha[j] = linhaP1[indiceP1];
+          }
+        }
+        // REGRA 3: Para outras colunas (ID, Nome, Idade), sempre Página 1
+        else {
+          if (indiceP1 !== undefined && linhaP1[indiceP1] !== undefined) {
+              novaLinha[j] = linhaP1[indiceP1];
+          }
+        }
+      });
+      
+      // Garante que o ID esteja na primeira coluna
+      novaLinha[0] = idAluno;
+      novosDadosP2.push(novaLinha);
+  }
+
+  // 4. Limpa a "Página 2" e escreve os dados atualizados
+  if (cabecalhoFinal.length > 0) {
+    paginaCorrecoes.clear();
+    paginaCorrecoes.getRange(1, 1, 1, cabecalhoFinal.length).setValues([cabecalhoFinal]);
+  }
+  if (novosDadosP2.length > 0) {
+    paginaCorrecoes.getRange(2, 1, novosDadosP2.length, cabecalhoFinal.length).setValues(novosDadosP2);
+  }
+  
+  Logger.log(`✅ Aba "${CONFIG.ABAS.CORRECOES_MANUAIS}" sincronizada. Status da P1, Presenças da P2.`);
+}
+
+// 📋 SINCRONIZAR RESPOSTAS DO FORMULÁRIO
+function sincronizarRespostasFormulario(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const formSheet = ss.getSheetByName(CONFIG.ABAS.RESPOSTAS_FORM);
+
+  if (!formSheet) {
+    Logger.log(`❌ A aba de respostas do formulário "${CONFIG.ABAS.RESPOSTAS_FORM}" não foi encontrada. Verifique se o formulário está corretamente vinculado a esta planilha.`);
+    throw new Error(`Aba de respostas "${CONFIG.ABAS.RESPOSTAS_FORM}" não encontrada.`);
+  }
+
+  Logger.log(`✅ Aba de respostas "${CONFIG.ABAS.RESPOSTAS_FORM}" encontrada.`);
+}
+
+// 🔄 CONVERTER NOMES PARA IDs
+function converterRespostasParaIds(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const formSheet = ss.getSheetByName(CONFIG.ABAS.RESPOSTAS_FORM);
+  
+  if (!formSheet) {
+    Logger.log("❌ Erro: Aba de respostas não encontrada.");
+    return;
+  }
+
+  const formData = formSheet.getDataRange().getValues();
+  // Coluna F (5) é onde chega os dados do Form ("101 - João")
+  const colOriginal = CONFIG.COLUNAS_FORMULARIO.ALUNOS_PRESENTES; 
+  // Coluna H (7) é onde guarda apenas os IDs ("101")
+  const colDestino = 7; 
+
+  let atualizacoes = 0;
+
+  for (let i = 1; i < formData.length; i++) {
+    const respostaRaw = formData[i][colOriginal];
+    
+    if (!respostaRaw || respostaRaw.toString().trim() === "") {
+      continue;
+    }
+
+    // Processa a lista de nomes/IDs
+    const itens = respostaRaw.toString().split(",");
+    
+    const idsValidos = itens.map(item => {
+      let texto = item.trim();
+      // Se o formato for "ID - Nome", extraímos apenas o ID antes do hífen
+      if (texto.includes(" - ")) {
+        return texto.split(" - ")[0].trim();
+      }
+      // Se não tiver hífen, assume que já é o ID puro
+      return texto;
+    }).filter(id => id !== "" && id.toLowerCase() !== "turma vazia (todos faltaram)");
+
+    // Grava o resultado na Coluna H
+    // Usamos a coluna H (que é uma coluna a parte) porque o Google Forms não sobrescreve ela na sincronização
+    if (idsValidos.length > 0) {
+      formSheet.getRange(i + 1, colDestino + 1).setValue(idsValidos.join(", "));
+      atualizacoes++;
+    } else {
+      // Se for "Turma Vazia", deixamos a célula de ID limpa para marcar falta em todos
+      formSheet.getRange(i + 1, colDestino + 1).setValue("");
+    }
+  }
+
+  // Força o Google Sheets a salvar as alterações
+  SpreadsheetApp.flush();
+  Logger.log(`✅ IDs extraídos e protegidos na Coluna H: ${atualizacoes} linhas processadas.`);
+}
+
+// 📊 PROCESSAR PRESENÇAS
+function processarPresencasSemLimparManuais(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const listaSheet = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  const formSheet = ss.getSheetByName(CONFIG.ABAS.RESPOSTAS_FORM);
+
+  if (!formSheet || !listaSheet) return;
+
+  const listaData = listaSheet.getDataRange().getValues();
+  const formData = formSheet.getDataRange().getValues();
+  const headerLista = listaData[0];
+  const timezone = Session.getScriptTimeZone();
+
+  const normalizarData = (d) => {
+    if (!d) return null;
+
+    const dataObj = (d instanceof Date) ? d : new Date(d);
+
+    if (isNaN(dataObj.getTime()) || dataObj.getFullYear() === 1969) {
+      return null;
+    }
+
+    return Utilities.formatDate(dataObj, timezone, "dd/MM/yyyy");
+  };
+
+
+  const mapaAlunos = {};
+  
+  // 1. Mapear IDs da Página1
+  for (let i = 1; i < listaData.length; i++) {
+    const idOriginal = listaData[i][0];
+    if (idOriginal !== "") {
+      const idStr = idOriginal.toString().trim();
+      mapaAlunos[idStr] = { 
+        linhaIndex: i, 
+        status: listaData[i][3] ? listaData[i][3].toString().trim().toLowerCase() : "", 
+        dataPrimeiraDesistencia: null,
+        contemD: false
+      };
+      
+      // Busca data de desistência
+      for (let j = 4; j < listaData[i].length; j++) {
+        if (String(listaData[i][j]).toUpperCase() === "D") {
+          mapaAlunos[idStr].contemD = true;
+          mapaAlunos[idStr].dataPrimeiraDesistencia = normalizarData(headerLista[j]);
+          break;
+        }
+      }
+    }
+  }
+
+  // 2. Processar Respostas do Form
+  for (let i = 1; i < formData.length; i++) {
+    const dataAulaRaw = formData[i][CONFIG.COLUNAS_FORMULARIO.DATA_AULA];
+    const idsPresentesRaw = formData[i][CONFIG.COLUNAS_FORMULARIO.IDS_PRESENTES];
+    
+    if (!dataAulaRaw) continue;
+
+    const dataAulaFormatada = normalizarData(dataAulaRaw);
+    if (!dataAulaFormatada) {
+        continue;
+    }
+
+    const dataAulaObj = new Date(dataAulaRaw);
+
+    
+    // IDs vindos do Form (já são IDs, apenas limpamos)
+    const idsPresentes = idsPresentesRaw ? 
+      idsPresentesRaw.toString().split(",").map(id => id.trim()) : [];
+
+    // Localizar coluna da data
+    let colPresenca = -1;
+    let atualHeader = listaSheet.getRange(1, 1, 1, listaSheet.getLastColumn()).getValues()[0];
+    for (let j = 4; j < atualHeader.length; j++) {
+      if (normalizarData(atualHeader[j]) === dataAulaFormatada) {
+        colPresenca = j + 1;
+        break;
+      }
+    }
+
+    if (colPresenca === -1) {
+      colPresenca = listaSheet.getLastColumn() + 1;
+      listaSheet.getRange(1, colPresenca).setValue(dataAulaFormatada);
+    }
+
+    // 4. Marcar P, F ou D
+    for (const id in mapaAlunos) {
+      const aluno = mapaAlunos[id];
+      const celula = listaSheet.getRange(aluno.linhaIndex + 1, colPresenca);
+      const valorAtual = celula.getValue().toString().toUpperCase();
+
+      if (valorAtual === "A" || valorAtual === "D") continue;
+
+      // Se o ID do aluno está na lista de IDs que o Form enviou
+      let novoValor = idsPresentes.includes(id) ? "P" : "F";
+
+      // Lógica do Desistente
+      if (aluno.status === "desistente" && aluno.dataPrimeiraDesistencia) {
+        const partes = aluno.dataPrimeiraDesistencia.split('/');
+        const dataDesist = new Date(partes[2], partes[1] - 1, partes[0]);
+        if (dataAulaObj.setHours(0,0,0,0) >= dataDesist.setHours(0,0,0,0)) novoValor = "D";
+      }
+
+      if (valorAtual !== novoValor) celula.setValue(novoValor);
+    }
+  }
+  Logger.log("✅ Processamento concluído sem erros de conversão.");
+}
+
+// APLICA CORREÇÕES MANUAIS (P2 -> P1), PROPAGA 'D' E SINCRONIZA STATUS
+function aplicarCorrecoesManuaisParaPagina1(CONFIG) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const paginaPrincipal = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+    const paginaCorrecoes = ss.getSheetByName(CONFIG.ABAS.CORRECOES_MANUAIS);
+    
+    if (!paginaCorrecoes) return;
+    
+    // Leitura Inicial dos Dados da P1 e P2
+    let dadosP1 = paginaPrincipal.getDataRange().getValues();
+    const dadosP2 = paginaCorrecoes.getDataRange().getValues();
+    
+    if (dadosP2.length <= 1) return;
+    
+    // --- 1. CONFIGURAÇÃO DE MAPAS ---
+    const cabecalhoP1 = dadosP1[0];
+    const mapaColunasP1 = new Map();
+    cabecalhoP1.forEach((h, i) => { if (i >= 4) mapaColunasP1.set(String(h), i); });
+    
+    let correcoesAplicadas = 0;
+
+    // =========================================================================
+    // PASSAGEM 1: Aplicar Apenas Correções Manuais (P2 -> P1)
+    // Objetivo: Garantir que o novo 'D' do usuário seja escrito na P1.
+    // =========================================================================
+    
+    const mapaAlunosP1_Inicial = new Map();
+    for (let i = 1; i < dadosP1.length; i++) {
+        const idAluno = String(dadosP1[i][0]);
+        if (idAluno) mapaAlunosP1_Inicial.set(idAluno, { linha: dadosP1[i], index: i });
+    }
+
+    for (let i = 1; i < dadosP2.length; i++) {
+        const linhaP2 = dadosP2[i];
+        const idAluno = String(linhaP2[0]);
+        if (!idAluno) continue;
+        
+        const alunoP1 = mapaAlunosP1_Inicial.get(idAluno);
+        if (!alunoP1) continue;
+        
+        const indexP1 = alunoP1.index;
+        
+        for (let j = 4; j < linhaP2.length; j++) {
+            const dataKey = String(dadosP2[0][j]);
+            const colP1 = mapaColunasP1.get(dataKey);
+            if (colP1 === undefined) continue;
+
+            const valorP2 = linhaP2[j] ? linhaP2[j].toString().trim().toUpperCase() : "";
+            const valorP1 = alunoP1.linha[colP1] ? alunoP1.linha[colP1].toString().trim().toUpperCase() : "";
+            
+            // Ignora Status
+            if (colP1 === 3) continue;
+
+            // REGRA: Aplica Correção Manual (P2 -> P1)
+            if (valorP2 !== "" && valorP2 !== valorP1) {
+                paginaPrincipal.getRange(indexP1 + 1, colP1 + 1).setValue(valorP2);
+                correcoesAplicadas++;
+            }
+        }
+    }
+    
+    // SINCRONIZAÇÃO CRÍTICA: OBRIGATÓRIA PARA RE-LER O NOVO 'D'
+    if (correcoesAplicadas > 0) {
+        SpreadsheetApp.flush();
+        dadosP1 = paginaPrincipal.getDataRange().getValues(); 
+        Logger.log(`Passagem 1 concluída: ${correcoesAplicadas} correções manuais aplicadas à P1.`);
+    }
+
+    // =========================================================================
+    // PASSAGEM 2: Propagação de 'D' e Sincronização Final de Status
+    // =========================================================================
+    
+    let propagacoesD = 0;
+    let statusAtualizadosP1 = 0;
+    
+    // Percorre a P1 atualizada
+    for (let i = 1; i < dadosP1.length; i++) {
+        const linha = dadosP1[i];
+        const id = linha[0] ? linha[0].toString().trim() : null;
+        if (!id) continue;
+
+        const statusAtual = linha[3] ? linha[3].toString().trim().toLowerCase() : "";
+        const linhaIndex = i + 1; // Linha 1-based na planilha
+
+        // 1. Encontra a coluna do PRIMEIRO 'D'
+        let colunaPrimeiraDesistencia = -1;
+        for (let j = 4; j < linha.length; j++) {
+            if (String(linha[j]).trim().toUpperCase() === "D") {
+                colunaPrimeiraDesistencia = j;
+                break; // Para na primeira ocorrência (o 'D' mais antigo)
+            }
+        }
+
+        const contemD = (colunaPrimeiraDesistencia !== -1);
+        
+
+        // FLUXO LÓGICO: A presença de D agora DISPARA ambas as ações
+        if (contemD) {
+
+            // 2A. PROPAGAÇÃO DE 'D'
+            for (let j = colunaPrimeiraDesistencia; j < linha.length; j++) {
+                
+                const valorP1 = String(linha[j]).trim().toUpperCase();
+
+                // Se a célula não for 'D', forçamos para 'D'.
+                if (valorP1 !== "D") { 
+                    paginaPrincipal.getRange(linhaIndex, j + 1).setValue("D");
+                    propagacoesD++;
+                }
+            }
+            
+            // 2B. SINCRONIZAÇÃO DE STATUS (Se tem D, Status = Desistente)
+            if (statusAtual === "cursando" || statusAtual === "ativo") {
+                paginaPrincipal.getRange(linhaIndex, 4).setValue("Desistente");
+                statusAtualizadosP1++;
+            }
+
+        } 
+        // 3. Regra de Reversão de Status: Se não tem D, mas está Desistente (volta para Cursando)
+        else if (!contemD && (statusAtual === "desistente" || statusAtual === "inativo")) {
+            paginaPrincipal.getRange(linhaIndex, 4).setValue("Cursando");
+            statusAtualizadosP1++;
+        }
+    }
+
+    if (propagacoesD > 0 || statusAtualizadosP1 > 0) {
+        SpreadsheetApp.flush(); 
+        Logger.log(`Passagem 2 concluída: ${propagacoesD} propagacões 'D' e ${statusAtualizadosP1} status sincronizados.`);
+    }
+}
+
+function atualizarFormularioPresencas(CONFIG) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  if (!sheet) return;
+  
+  const data = sheet.getRange("A2:D" + sheet.getLastRow()).getValues()
+    .filter(r => r[0] && r[1] && r[3] && 
+               (r[3].toString().trim().toLowerCase() === "cursando" || 
+                r[3].toString().trim().toLowerCase() === "ativo"));
+
+  const alunosUnicos = [];
+  const idsVistos = new Set();
+  
+  if (data.length > 0) {
+    for (const aluno of data) {
+      const id = aluno[0].toString().trim();
+      const nome = aluno[1].toString().trim();
+      if (!idsVistos.has(id)) {
+        idsVistos.add(id);
+        // FORMATO: "ID - Nome" para o script conseguir separar depois
+        alunosUnicos.push(`${id} - ${nome}`);
+      }
+    }
+  }
+
+  const form = FormApp.openById(CONFIG.FORM_ID);
+  const items = form.getItems();
+  let pergunta = null;
+
+  for (let item of items) {
+    if (item.getTitle().toLowerCase().includes("alunos presentes")) {
+      pergunta = item.asCheckboxItem();
+      break;
+    }
+  }
+
+  if (pergunta) {
+    let choices = alunosUnicos.map(texto => pergunta.createChoice(texto));
+    choices.push(pergunta.createChoice("❌ Turma vazia (todos faltaram)"));
+    pergunta.setChoices(choices);
+    Logger.log(`✅ Formulário atualizado com formato ID - Nome.`);
+  }
+}
+
+// --- FUNÇÕES MANUAIS E DE MANUTENÇÃO ---
+
+// 💾 SALVAR CORREÇÕES MANUAIS
+function salvarCorrecoesManuaisPresencas(CONFIG, skipUI = false) {
+  if (EM_PROCESSAMENTO_AUTOMATICO) {
+    Logger.log("🚫 Ignorando salvamento durante processamento automático");
+    return;
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const usuario = Session.getActiveUser().getEmail() || Session.getActiveUser().getEffectiveUser().getEmail() || "Usuário Desconhecido";
+  const agora = new Date();
+  
+  const paginaPrincipal = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  const paginaCorrecoes = ss.getSheetByName(CONFIG.ABAS.CORRECOES_MANUAIS);
+
+  if (!paginaCorrecoes) {
+    if (!skipUI) ui.alert('Aba de Correções Inexistente', `A aba "${CONFIG.ABAS.CORRECOES_MANUAIS}" não foi encontrada. Sincronize os dados primeiro rodando o "Processamento Diário".`, ui.ButtonSet.OK);
+    return;
+  }
+    
+  // Lemos os dados UMA VEZ.
+  const dadosPagina1 = paginaPrincipal.getDataRange().getValues();
+  const dadosPagina2 = paginaCorrecoes.getDataRange().getValues();
+  
+  // Mapear dados da P2 por ID para busca rápida
+  const mapaPagina2PorId = new Map();
+  if (dadosPagina2.length > 1) {
+    for (let i = 1; i < dadosPagina2.length; i++) {
+      const idAluno = String(dadosPagina2[i][0]);
+      if (idAluno) {
+        mapaPagina2PorId.set(idAluno, dadosPagina2[i]);
+      }
+    }
+  }
+
+  const alteracoes = [];
+  const cabecalho = dadosPagina1[0];
+  
+  // 1. Encontra e registra as correções na Página 2
+  for (let i = 1; i < dadosPagina1.length; i++) {
+    const linha1 = dadosPagina1[i];
+    const id = linha1[0] ? linha1[0].toString() : '';
+    if (!id) continue;
+    
+    const statusAluno = linha1[3] ? linha1[3].toString().trim().toLowerCase() : "";
+    const isDesistente = (statusAluno === "desistente" || statusAluno === "inativo");
+    
+    // Encontra a data da primeira desistência (D) na P1
+    let dataPrimeiraDesistencia = null;
+    for (let j = 4; j < linha1.length; j++) {
+      if (linha1[j] === "D" && !dataPrimeiraDesistencia) {
+        dataPrimeiraDesistencia = cabecalho[j];
+        break;
+      }
+    }
+    
+    const linha2 = mapaPagina2PorId.get(id);
+
+    if (linha2) {
+      for (let j = 4; j < linha1.length; j++) {
+        const val1 = linha1[j] ? linha1[j].toString().trim().toUpperCase() : "";
+        const val2 = linha2[j] ? linha2[j].toString().trim().toUpperCase() : "";
+        
+        // Coluna Status: Sempre P1 na P2
+        if (j === 3) {
+          linha2[3] = linha1[3];
+          continue;
+        }
+        
+        // TRATAMENTO CONDICIONAL DE DESISTENTE (Limpa correção manual na P2, se deve ser 'D')
+        if (isDesistente) {
+          
+          let deveSerD = false;
+          
+          // Lógica de checagem se a data deve ser 'D'
+          if (dataPrimeiraDesistencia) {
+            try {
+              const dataColunaObj = new Date(cabecalho[j].split(' ')[0]);
+              const dataDObj = new Date(dataPrimeiraDesistencia.split(' ')[0]);
+              
+              if (dataColunaObj.setHours(0, 0, 0, 0) >= dataDObj.setHours(0, 0, 0, 0)) {
+                deveSerD = true;
+              }
+            } catch (e) {
+              deveSerD = false;
+            }
+          } 
+
+          if (deveSerD) {
+            // Se P1 estiver diferente de 'D', registra a alteração
+            if (val1 !== "D") {
+              alteracoes.push({ 
+                id: id, nome: linha1[1], data: cabecalho[j], de: val1, para: "D", 
+                linha: i + 1, coluna: j + 1, colIndexP2: j 
+              });
+            }
+            // LIMPA A CORREÇÃO MANUAL NA P2 FORÇANDO 'D' (P2 deve ser o valor correto)
+            if (val2 !== "D") {
+              linha2[j] = "D"; 
+            }
+            continue; 
+          }
+        }
+        
+        // REGRA NORMAL: Sincroniza P1 com P2 (registra a correção do usuário em P2)
+        if (val1 !== val2) {
+          // Registra a alteração que o usuário quer: DE P1 (val1) PARA P2 (val2)
+          alteracoes.push({ 
+            id: id, nome: linha1[1], data: cabecalho[j], de: val1, para: val2, 
+            linha: i + 1, coluna: j + 1, colIndexP2: j 
+          });
+          // P2 é atualizado para conter o valor corrigido (val2)
+          linha2[j] = val2; 
+        }
+      }
+      mapaPagina2PorId.set(id, linha2);
+    }
+  }
+
+  if (alteracoes.length === 0) {
+    if (!skipUI) ui.alert('ℹ️ Nenhuma Alteração', 'Nenhuma alteração manual foi detectada.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 2. Constrói e escreve os novos dados na Página 2 (Corrige a P2)
+  const novosDadosPagina2 = [dadosPagina2[0]]; 
+  
+  for (let i = 1; i < dadosPagina1.length; i++) {
+    const id = String(dadosPagina1[i][0]);
+    if (!id) continue;
+    
+    let linhaAtualizada = mapaPagina2PorId.get(id);
+    
+    if (linhaAtualizada) {
+      linhaAtualizada[0] = dadosPagina1[i][0];
+      linhaAtualizada[1] = dadosPagina1[i][1];
+      linhaAtualizada[2] = dadosPagina1[i][2];
+      linhaAtualizada[3] = dadosPagina1[i][3]; 
+        
+      novosDadosPagina2.push(linhaAtualizada);
+    }
+  }
+  
+  if (novosDadosPagina2.length > 0 && novosDadosPagina2[0].length > 0) {
+    // Limpa e reescreve a P2
+    paginaCorrecoes.getRange(1, 1, novosDadosPagina2.length, novosDadosPagina2[0].length).setValues(novosDadosPagina2);
+  }
+
+  SpreadsheetApp.flush(); 
+
+  // 3. Adiciona o histórico de correções como comentário (utiliza os dados de alteracoes)
+  const timezonePlanilha = ss.getSpreadsheetTimeZone();
+  for (const alt of alteracoes) {
+    const dataHoraFormatada = Utilities.formatDate(agora, timezonePlanilha, "dd/MM/yyyy HH:mm:ss");
+    
+    let linhaP2 = -1;
+    for (let i = 1; i < novosDadosPagina2.length; i++) {
+      if (String(novosDadosPagina2[i][0]) === alt.id) {
+        linhaP2 = i + 1;
+        break;
+      }
+    }
+    
+    if (linhaP2 !== -1) {
+      const celulaCorrecao = paginaCorrecoes.getRange(linhaP2, alt.coluna);
+      const historicoAntigo = celulaCorrecao.getComment() || "";
+      
+      let novoComentario = `[${dataHoraFormatada} por ${usuario}]\n`;
+      novoComentario += `Correção: ${alt.de} → ${alt.para}\n`;
+      
+      if (historicoAntigo) {
+        novoComentario += '\n--- Histórico Anterior ---\n' + historicoAntigo;
+      }
+      
+      celulaCorrecao.setComment(novoComentario);
+    }
+  }
+
+  // 4. Aplica as correções de volta para a Página 1 e SINCRONIZA O STATUS.
+  aplicarCorrecoesManuaisParaPagina1(CONFIG);
+
+// 5. ATUALIZA O STATUS DA PÁGINA 2 COM O NOVO STATUS FINAL DA PÁGINA 1
+  const dadosP1Finais = paginaPrincipal.getDataRange().getValues();
+  const numLinhas = dadosP1Finais.length - 1; // Excluindo o cabeçalho
+  const linhaInicial = 2; // Começa na linha 2
+
+  if (numLinhas > 0) {
+    // Range de Status na P1 (Linha 2, Coluna 4, NumLinhas, 1 Coluna)
+    const statusP1Range = paginaPrincipal.getRange(linhaInicial, 4, numLinhas, 1);
+    // Range de Status na P2 (Linha 2, Coluna 4, NumLinhas, 1 Coluna)
+    const statusP2Range = paginaCorrecoes.getRange(linhaInicial, 4, numLinhas, 1);
+    
+    // Le o Status final da P1
+    const statusP1Values = statusP1Range.getValues();
+    
+    // Escreve o Status final na P2
+    statusP2Range.setValues(statusP1Values);
+    
+    Logger.log("🔄 Status da Página de Correções atualizado com base na Página Principal.");
+  }
+  
+  SpreadsheetApp.flush(); // Flush final para garantir que o P2 Status foi escrito.
+  if (!skipUI) ui.alert('✅ Correções Salvas!', 
+    `Foram salvas ${alteracoes.length} alterações na aba "${CONFIG.ABAS.CORRECOES_MANUAIS}" e o histórico foi registrado em comentários.\n\n` +
+    'O Status do aluno foi sincronizado e as correções foram aplicadas à Página 1.',
+    ui.ButtonSet.OK
+  );
+  Logger.log(`💾 ${alteracoes.length} correções manuais salvas e histórico adicionado em comentários.`);
+}
+
+// FUNÇÃO PARA LIMPAR COLUNAS DUPLICADAS EXISTENTES
+function limparColunasDuplicadas(CONFIG) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const listaSheet = ss.getSheetByName(CONFIG.ABAS.LISTA_ALUNOS);
+  const dados = listaSheet.getDataRange().getValues();
+  const header = dados[0];
+  
+  const datasVistas = new Set();
+  const colunasParaManter = [];
+  const colunasParaRemover = [];
+  
+  // Identifica duplicatas (da esquerda para direita, mantendo a primeira ocorrência)
+  for (let i = 0; i < header.length; i++) {
+    const dataHeader = header[i];
+    if (i < 4) {
+      // Mantém as primeiras 4 colunas fixas
+      colunasParaManter.push(i);
+      continue;
+    }
+    
+    const headerStr = String(dataHeader);
+    const dataBaseMatch = headerStr.match(/^(\d{1,2}\/\d{1,2}\/\d{4})( - \d+)?$/);
+    
+    if (dataBaseMatch) {
+      const dataKey = dataBaseMatch[1] + (dataBaseMatch[2] || ' - 1');
+      
+      if (!datasVistas.has(dataKey)) {
+        datasVistas.add(dataKey);
+        colunasParaManter.push(i);
+      } else {
+        colunasParaRemover.push(i);
+      }
+    } else {
+      colunasParaManter.push(i);
+    }
+  }
+  
+  // Remove colunas duplicadas (da direita para esquerda)
+  colunasParaRemover.sort((a, b) => b - a).forEach(colIndex => {
+    listaSheet.deleteColumn(colIndex + 1);
+  });
+  
+  Logger.log(`✅ Removidas ${colunasParaRemover.length} colunas duplicadas`);
+  Logger.log(`📊 Total de colunas mantidas: ${colunasParaManter.length}`);
+  
+  return colunasParaRemover.length;
+}
