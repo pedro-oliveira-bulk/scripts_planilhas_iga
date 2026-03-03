@@ -21,33 +21,27 @@ const CONFIG = {
 };
 function autorizarAcessoAoDrive() {
   try {
-    // Força o prompt de autorização de forma genérica
     const root = DriveApp.getRootFolder();
     console.log("Pasta raiz acessada: " + root.getName());
     
-    // Usamos esta forma para o Google não travar a execução antes de pedir permissão
     const drive = DriveApp;
     const metodo = "getFolderById";
     
-    // Tenta acessar as pastas do seu CONFIG
     drive[metodo](CONFIG.PASTAS_DRIVE.lanche);
     
     SpreadsheetApp.getUi().alert("Autorização concluída com sucesso!");
   } catch (e) {
-    // Se o erro for de falta de permissão, o Google abrirá a janela automaticamente
     SpreadsheetApp.getUi().alert("Clique em 'Revisar Permissões' na janela que apareceu para liberar o Drive.");
     console.error("Erro detalhado: " + e.message);
   }
 }
 function forcarSincronizacaoGeral() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  // Isso ignora as travas e força a atualização
   ModeloSheets.atualizarPagina1ComPresencas(ss, CONFIG);
   ModeloSheets.espelharCorrecoesManuais(ss, CONFIG);
   SpreadsheetApp.getUi().alert("Sincronização forçada concluída!");
 }
 // SERVIÇO WEB (WEB APP)
-// Esta função faz a ponte para carregar o HTML que está na Biblioteca.
 function doGet(e) {
   return ModeloSheets.servirInterface();
 }
