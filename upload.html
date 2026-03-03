@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f3f9;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .card {
+      background: #ffffff;
+      max-width: 420px;
+      margin: 0 auto;
+      padding: 24px;
+      border-radius: 14px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+
+    h2 {
+      margin-top: 0;
+      color: #4b4453;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    label {
+      display: block;
+      padding: 14px;
+      margin-top: 16px;
+      border: 2px dashed #8e7cc3;
+      border-radius: 10px;
+      cursor: pointer;
+      color: #8e7cc3;
+      font-weight: bold;
+      transition: 0.3s;
+    }
+
+    label:hover {
+      background: #f1eefb;
+    }
+
+    .preview {
+      display: none;
+      margin-top: 12px;
+      width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+      border-radius: 10px;
+      border: 1px solid #ddd;
+    }
+
+    button {
+      margin-top: 24px;
+      width: 100%;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: bold;
+      background: #8e7cc3;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: 0.3s;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    button:hover:not(:disabled) {
+      background: #7a68b6;
+    }
+
+    .ok {
+      color: #4CAF50;
+      font-size: 14px;
+      margin-top: 6px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h2>Registro de Presença</h2>
+
+    <input type="file" id="lanche" accept="image/*">
+    <label for="lanche">Foto do lanche</label>
+    <img id="preview-lanche" class="preview">
+    <div id="ok-lanche" class="ok"></div>
+
+    <input type="file" id="selfie" accept="image/*">
+    <label for="selfie">Selfie</label>
+    <img id="preview-selfie" class="preview">
+    <div id="ok-selfie" class="ok"></div>
+
+    <input type="file" id="lista" accept="image/*">
+    <label for="lista">Foto da lista</label>
+    <img id="preview-lista" class="preview">
+    <div id="ok-lista" class="ok"></div>
+
+    <button id="btnSalvar" onclick="salvarPresenca()">Salvar Presença</button>
+  </div>
+
+  <script>
+    const imagens = {
+      lanche: null,
+      selfie: null,
+      lista: null
+    };
+
+    ["lanche", "selfie", "lista"].forEach(tipo => {
+      document.getElementById(tipo).onchange = function () {
+        const file = this.files[0];
+        if (!file) return;
+
+        document.getElementById("ok-" + tipo).innerText = "Processando...";
+
+        const reader = new FileReader();
+        reader.onload = e => {
+          imagens[tipo] = e.target.result;
+
+          const img = document.getElementById("preview-" + tipo);
+          img.src = e.target.result;
+          img.style.display = "block";
+
+          document.getElementById("ok-" + tipo).innerText = "Imagem anexada";
+        };
+        reader.readAsDataURL(file);
+      };
+    });
+
+    function salvarPresenca() {
+      const botao = document.getElementById("btnSalvar");
+
+      if (!imagens.lanche || !imagens.selfie || !imagens.lista) {
+        alert("Por favor, anexe as três fotos antes de continuar.");
+        return;
+      }
+
+      botao.disabled = true;
+      botao.innerText = "Enviando dados...";
+
+      google.script.run
+        .withSuccessHandler(res => {
+          if (res !== "Presença e fotos registradas com sucesso!") {
+              alert(res);
+              return;
+          }
+          alert(res);
+        })
+        .withFailureHandler(err => {
+          alert("Erro ao salvar: " + err.message);
+          botao.disabled = false;
+          botao.innerText = "Tentar Novamente";
+        })
+        .salvarPresencaComFotos(
+          imagens.lanche,
+          imagens.selfie,
+          imagens.lista
+        );
+    }
+  </script>
+</body>
+</html>
