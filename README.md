@@ -1,42 +1,242 @@
-# scripts_planilhas_iga
-# Tutorial de como inserir uma biblioteca na planilha:
+# Biblioteca de Presenças – Google Apps Script
 
-## 1- Ir no Apps Script da biblioteca principal  e copiar o ID dela (a biblioteca já foi implementada)
+Sistema modular para gerenciamento de presenças em Google Sheets com arquitetura baseada em biblioteca reutilizável, controle de concorrência, validação de duplicidade, atualização automática de abas, lançar presenças e upload seguro de imagens para Google Drive.
 
-* ID da biblioteca: 1J8TBP-IxMVu6dlh0ZJs_culjuVBjU6SVI1Sh23TOVoNsxrokkeQePeBG
+# Visão Geral
+
+A Biblioteca de Presenças foi desenvolvida para centralizar e padronizar a lógica de controle de aulas e presenças em múltiplas planilhas Google Sheets.
+
+Ela resolve problemas comuns como:
+
+- Gravação duplicada de aula
+- Execução simultânea
+- Inconsistência de datas
+- Upload indevido de imagens
+- Atualização manual de colunas de presença
+- Erro antigo do forms em ter presenças fieis ao lançamento delas
   
-<img width="1920" height="1080" alt="id_principal_library" src="https://github.com/user-attachments/assets/898596e1-6886-49fa-b8ef-8b84770b05a9" />
+O sistema é dividido em:
 
+- **Biblioteca** – Regras de negócio e controle
+- **Projeto Cliente** – Interface e personalizações locais
 
-## 2- Configurando a planilha cliente
+---
 
-* Ir no Apps Script da planilha que você quer colocar a biblioteca
-* Colar o arquivo script_planilha_cliente.txt ou script-cliente-2.txt (a diferença de um para outro é somente a CONFIG, mas é recomendado deixar a config da planilha original mesmo), IMPORTANTE! LEMBRE DE COLAR O LINK DO FORMS DE CADA PLANILHA E A CONFIG DELE, SÃO ÚNICOS!
+# Arquitetura do Sistema
 
-<img width="653" height="32" alt="Captura de tela de 2026-01-14 08-43-39" src="https://github.com/user-attachments/assets/16db892e-0d1b-42bb-b224-75f5129cd382" />
-(exemplo link forms)
-<img width="246" height="197" alt="Captura de tela de 2026-01-16 07-49-45" src="https://github.com/user-attachments/assets/019a8289-260f-471d-a4ba-92770bc6a4dd" />
-(exemplo config)
+## 1. Biblioteca
 
+Responsável por:
 
+- Validação de regras
+- Controle transacional
+- Integração com Google Drive
+- Atualização automática de abas
+- Controle de aula duplicada
 
+### Funções públicas expostas
 
-* Ir em bibliotecas e adicionar ‘+’
+```javascript
+processamentoDiarioCompletoPresencas()
+salvarPresencas()
+atualizarPagina1ComPresencas()
+```
 
-<img width="1920" height="1080" alt="library" src="https://github.com/user-attachments/assets/c86e6948-0a2f-461d-ba47-9354cbb7fda8" />
+2. Projeto Cliente
 
-<img width="517" height="489" alt="Captura de tela de 2026-01-14 08-49-58" src="https://github.com/user-attachments/assets/ec3d01c6-3c08-4fef-ba9e-89dcc176f465" />
+Responsável por:
 
-* Vai abrir essa janela acima, em Código do Script você vai colar o ID da planilha biblioteca (está no passo 1)
-* Deixe dessa maneira e aperte em adicionar
-  
-<img width="234" height="293" alt="Captura de tela de 2026-01-14 08-52-41" src="https://github.com/user-attachments/assets/06eed9c3-5164-4d9b-99a4-e8d88dc53d47" />
+-Interface da planilha
+-WebApp de envio de imagens
+-Configurações locais
+-Chamadas à biblioteca
 
-* Com a biblioteca adicionada, dê um ctrl S para salvar (IMPORTANTE)
-* Execute a função processamentoDiarioCompletoPresencas
+Exemplo de chamada:
 
-<img width="706" height="210" alt="Captura de tela de 2026-01-14 08-55-11" src="https://github.com/user-attachments/assets/1cc51f41-b156-466c-a7ce-4b56a6d9aa05" />
+```javascript
+function executarProcessoCompleto() {
+  PresencasLib.processamentoDiarioCompletoPresencas();
+}
+```
 
-* Após executar, olhe se a função rodou corretamente, se rodou, então está tudo ok e sua planilha já está utilizando a biblioteca.
+Funcionalidades:
+- Controle de Concorrência
 
-<img width="926" height="392" alt="Captura de tela de 2026-01-14 08-56-27" src="https://github.com/user-attachments/assets/dec3cd1b-24ea-40cc-969d-c2a2f09ab4a1" />
+Utiliza:
+
+```javascript
+LockService.getScriptLock()
+```
+
+Evita:
+
+-Execução simultânea
+-Duplicação de registros
+-Corrupção de dados
+-Validação de Aula Duplicada
+
+Fluxo:
+
+-Normalização da data (remoção do horário)
+-Verificação se já existe coluna com mesma data
+-Permissão de duplicação apenas se D4 estiver marcado
+-Controle de Aula Duplicada
+
+Célula utilizada:
+
+-Lancar_Presenca!D4
+
+TRUE → Aula registrada em:
+
+-Página 1
+
+Correções Manuais
+
+-FALSE → Aula registrada apenas uma vez
+-Normalização de Datas
+
+Para evitar erro de comparação:
+
+-new Date(ano, mes, dia)
+-Remove horário da data e permite comparação correta.
+-Atualização Automática da Página 1
+
+Processo:
+
+-Lê data em B4
+-Procura coluna correspondente
+-Se não existir, cria nova
+
+Marca:
+
+-P (Presente)
+-F (Falta)
+
+-Aplica cores configuradas
+-Upload Seguro de Imagens
+-Executado apenas após validações
+-Cancelado em caso de erro
+-Utiliza pasta específica no Drive
+-Executa como proprietário do script
+
+Requisitos:
+
+-Conta Google
+-Google Sheets
+-Google Apps Script
+-Permissão para implantar WebApp
+
+### Instalação da Biblioteca:
+1. Criar Projeto Base
+
+-Acesse: https://script.google.com
+-Crie novo projeto
+-Insira o código principal
+-Salve
+
+2. Criar Versão
+
+-Clique em Implantar
+-Selecione Gerenciar versões
+-Clique em Nova versão
+-Adicione descrição
+-Salve
+
+3. Obter ID do Script
+
+-Vá em Configurações do Projeto
+-Copie o ID do Script
+-Formato:
+  -ex: AKfycbxxxxxxxxxxxxxxxx
+
+### Configuração no Projeto Cliente:
+1. Abrir Apps Script da Planilha
+
+No Google Sheets:
+
+-Extensões → Apps Script
+
+2. Adicionar Biblioteca
+
+-Vá em Bibliotecas
+-Clique em Adicionar biblioteca
+-Cole o ID do Script
+-Selecione versão
+
+Defina identificador:
+
+-PresencasLib
+-Salvar
+
+Configuração do WebApp:
+
+O projeto cliente deve conter:
+
+```javascript
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile("upload");
+}
+```
+
+Requisitos importantes:
+-
+-Nome do arquivo HTML deve ser exatamente igual
+-Sensível a maiúsculas/minúsculas
+-Implantação Recomendada
+-Tipo: Aplicativo da Web
+
+Configuração:
+
+-Executar como: Você
+-Quem tem acesso: Qualquer pessoa
+
+Isso garante:
+
+-Upload funcional
+-Acesso externo permitido
+-Controle centralizado
+
+### Estrutura de Pastas:
+
+Biblioteca:
+
+Codigo.gs
+WebApp.gs
+upload.html
+
+Serviços:
+-Drive
+
+Cliente:
+
+-Fluxo Completo do Sistema
+-Aba lançar presenças com link do WebApp para carregar imagens e enviar as presenças
+-Opção de duplicar presenças
+
+Sistema:
+
+-Aplica Lock
+-Valida duplicidade
+-Salva dados
+-Atualiza Página 1
+-Atualiza Correções Manuais (se necessário)
+-Realiza upload das imagens
+-Finaliza execução
+
+### Boas Práticas Implementadas:
+
+-Controle transacional
+-Separação de responsabilidades
+-Arquitetura modular
+-Reutilização via biblioteca
+-Validação antes de efeitos colaterais
+-Normalização de dados
+-Execução idempotente controlada
+
+### Garantias do Sistema:
+
+-Não grava aula duplicada sem D4
+-Não envia imagem em caso de erro
+-Não executa simultaneamente
+-Cria colunas de presença automaticamente
+-Mantém integridade dos dados
