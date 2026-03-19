@@ -1,82 +1,180 @@
 /** @OnlyCurrentDoc */
-// VARIÁVEL GLOBAL para controle de concorrência dentro da Lib
-var EM_PROCESSAMENTO = false;
 
 // 1. FUNÇÃO PRINCIPAL
 function executarProcessoCompleto(ss, config) {
-  if (EM_PROCESSAMENTO) return;
-  EM_PROCESSAMENTO = true;
-  try {
-    validarStatusGeral(ss, config);
-    SpreadsheetApp.flush();
 
-    aplicarRegraDesistenciaAutomatica(ss, config);
-    SpreadsheetApp.flush();
+  validarStatusGeral(ss, config);
+  SpreadsheetApp.flush();
 
-    espelharCorrecoesManuais(ss, config);
-    SpreadsheetApp.flush();
+  aplicarRegraDesistenciaAutomatica(ss, config);
+  SpreadsheetApp.flush();
 
-    carregarAlunosNaPresenca(ss, config);
-    
-    console.log("Processo concluído.");
-  } finally{
-    EM_PROCESSAMENTO = false;
-  }
+  espelharCorrecoesManuais(ss, config);
+  SpreadsheetApp.flush();
+
+  carregarAlunosNaPresenca(ss, config);
+
+  console.log("Processo concluído.");
 }
 
+function dataJaExisteNoLog(dadosSheet, dataAula) {
+  const valores = dadosSheet.getDataRange().getValues();
+  if (valores.length < 1) return false;
+
+  const dataNormalizada = new Date(
+    dataAula.getFullYear(),
+    dataAula.getMonth(),
+    dataAula.getDate()
+  ).getTime();
+
+  for (let i = 0; i < valores.length; i++) {
+    const dataLinha = valores[i][0];
+
+    if (dataLinha instanceof Date) {
+      const dataComparar = new Date(
+        dataLinha.getFullYear(),
+        dataLinha.getMonth(),
+        dataLinha.getDate()
+      ).getTime();
+
+      if (dataComparar === dataNormalizada) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 // 2. LANÇAMENTO DE PRESENÇAS
 function salvarPresenca(ss, config, linksImagens) {
-  if (EM_PROCESSAMENTO) return;
-  EM_PROCESSAMENTO = true;
-  
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return "Sistema ocupado. Tente novamente.";
+  }
+
   const lancar = ss.getSheetByName(config.ABAS.LANCAR);
   const dadosSheet = ss.getSheetByName(config.ABAS.DADOS);
 
   try {
-    const dataAula = lancar.getRange("B4").getValue();
+
+    const dataAulaRaw = lancar.getRange("B4").getValue();
     const professor = lancar.getRange("B5").getValue();
 
-    if (!dataAula || !professor) throw new Error("Preencha data e professor!");
+    if (!dataAulaRaw || !professor) {
+      throw new Error("Preencha data e professor!");
+    }
 
+    // =========================
+    // NORMALIZA DATA (remove horário)
+    // =========================
+    let dataAula = dataAulaRaw instanceof Date
+      ? dataAulaRaw
+      : new Date(dataAulaRaw);
+
+    if (isNaN(dataAula)) {
+      throw new Error("Data inválida.");
+    }
+
+    dataAula = new Date(
+      dataAula.getFullYear(),
+      dataAula.getMonth(),
+      dataAula.getDate()
+    );
+
+    // =========================
+    // VERIFICA DUPLICAÇÃO
+    // =========================
+    const ultimaLinha = dadosSheet.getLastRow();
+
+    if (ultimaLinha > 1) {
+      const datasExistentes = dadosSheet
+        .getRange(2, 1, ultimaLinha - 1, 1)
+        .getValues();
+
+      const dataNovaTime = dataAula.getTime();
+
+      for (let i = 0; i < datasExistentes.length; i++) {
+
+        const dataExistente = datasExistentes[i][0];
+        if (!dataExistente) continue;
+
+        let dataComparar = dataExistente instanceof Date
+          ? dataExistente
+          : new Date(dataExistente);
+
+        if (isNaN(dataComparar)) continue;
+
+        dataComparar = new Date(
+          dataComparar.getFullYear(),
+          dataComparar.getMonth(),
+          dataComparar.getDate()
+        );
+
+        if (dataComparar.getTime() === dataNovaTime) {
+          throw new Error("Já existe presença registrada para essa data.");
+        }
+      }
+    }
+
+    // =========================
+    // PROCESSA LISTA DE ALUNOS
+    // =========================
     const dadosForm = lancar.getRange("A13:C60").getValues();
-    const presentes = [], ausentes = [];
+    const presentes = [];
+    const ausentes = [];
 
     dadosForm.forEach(([id, nome, check]) => {
       if (!id) return;
-      check === true ? presentes.push(String(id).trim()) : ausentes.push(String(id).trim());
+
+      if (check === true) {
+        presentes.push(String(id).trim());
+      } else {
+        ausentes.push(String(id).trim());
+      }
     });
 
-    const { lanche, selfie, lista } = linksImagens;
+    const { lanche, selfie, lista } = linksImagens || {
+      lanche: "",
+      selfie: "",
+      lista: ""
+    };
 
-    // Registra na aba de log
+    // =========================
+    // REGISTRA NO LOG
+    // =========================
     dadosSheet.appendRow([
-      dataAula, 
-      professor, 
-      presentes.join(", "), 
-      ausentes.join(", "), 
-      lanche, 
-      selfie, 
-      lista, 
+      dataAula,
+      professor,
+      presentes.join(", "),
+      ausentes.join(", "),
+      lanche,
+      selfie,
+      lista,
       new Date()
     ]);
-    
-    SpreadsheetApp.flush(); 
-    
+
+    SpreadsheetApp.flush();
+
+    // =========================
+    // ATUALIZA SISTEMA
+    // =========================
     atualizarPagina1ComPresencas(ss, config);
     espelharCorrecoesManuais(ss, config);
     aplicarRegraDesistenciaAutomatica(ss, config);
 
-    return "Presença e fotos registradas com sucesso!";
+    return "Presença registrada com sucesso!";
 
   } catch (e) {
     return "Erro ao salvar: " + e.message;
   } finally {
-    EM_PROCESSAMENTO = false;
+    lock.releaseLock();
   }
 }
 
 // 3. ATUALIZA P1
 function atualizarPagina1ComPresencas(ss, config) {
+
   const p1 = ss.getSheetByName(config.ABAS.P1);
   const dadosSheet = ss.getSheetByName(config.ABAS.DADOS);
   const lancar = ss.getSheetByName(config.ABAS.LANCAR);
@@ -84,20 +182,17 @@ function atualizarPagina1ComPresencas(ss, config) {
   if (!p1 || !dadosSheet || !lancar) return;
 
   // ================================
-  // 1. CAPTURA E NORMALIZA DATA
+  // 1. CAPTURA DATA
   // ================================
-  let dataAulaRaw = lancar.getRange("B4").getValue();
+  let dataAula = lancar.getRange("B4").getValue();
+  const aulaDuplicada = lancar.getRange("D4").getValue() === true;
 
-  let dataAula = dataAulaRaw instanceof Date
-    ? dataAulaRaw
-    : new Date(dataAulaRaw);
-
-  if (isNaN(dataAula)) {
-    console.log("Data inválida em B4.");
-    return;
+  if (!(dataAula instanceof Date)) {
+    dataAula = new Date(dataAula);
   }
 
-  // Remove horário
+  if (isNaN(dataAula)) return;
+
   dataAula = new Date(
     dataAula.getFullYear(),
     dataAula.getMonth(),
@@ -105,70 +200,55 @@ function atualizarPagina1ComPresencas(ss, config) {
   );
 
   // ================================
-  // 2. PEGA ÚLTIMO REGISTRO DA ABA DADOS
+  // 2. PEGA ÚLTIMO REGISTRO DO LOG
   // ================================
-  const registrosDados = dadosSheet.getDataRange().getValues();
-  if (registrosDados.length < 2) return;
+  const registros = dadosSheet.getDataRange().getValues();
+  if (registros.length < 2) return;
 
-  const ultimaLinhaDados = registrosDados[registrosDados.length - 1];
-  const presentes = String(ultimaLinhaDados[2] || "")
+  const ultimaLinha = registros[registros.length - 1];
+  const presentes = String(ultimaLinha[2] || "")
     .split(",")
     .map(id => id.trim())
     .filter(id => id !== "");
 
   // ================================
-  // 3. LOCALIZA OU CRIA COLUNA DA DATA
+  // 3. DEFINE QUANTAS COLUNAS CRIAR
   // ================================
-  const lastCol = p1.getLastColumn();
-  const headers = p1.getRange(1, 1, 1, lastCol).getValues()[0];
+  const totalColunasCriar = aulaDuplicada ? 2 : 1;
 
-  let colIndex = -1;
+  for (let k = 0; k < totalColunasCriar; k++) {
 
-  for (let j = 4; j < headers.length; j++) {
-    if (headers[j] instanceof Date) {
-      const headerDate = new Date(
-        headers[j].getFullYear(),
-        headers[j].getMonth(),
-        headers[j].getDate()
-      );
+    const novaColuna = p1.getLastColumn() + 1;
 
-      if (headerDate.getTime() === dataAula.getTime()) {
-        colIndex = j;
-        break;
-      }
-    }
-  }
-
-  // Se não existir, cria nova coluna
-  if (colIndex === -1) {
-    colIndex = Math.max(4, lastCol);
-    p1.getRange(1, colIndex + 1)
+    // Cria header
+    p1.getRange(1, novaColuna)
       .setValue(dataAula)
       .setNumberFormat("dd/MM/yyyy");
+
+    // ================================
+    // 4. MARCA PRESENÇA
+    // ================================
+    const ultimaLinhaP1 = p1.getLastRow();
+    if (ultimaLinhaP1 < 2) return;
+
+    const ids = p1.getRange(2, 1, ultimaLinhaP1 - 1, 1).getValues();
+
+    const resultados = [];
+    const cores = [];
+
+    for (let i = 0; i < ids.length; i++) {
+
+      const idAtual = String(ids[i][0]).trim();
+      const isPresente = presentes.includes(idAtual);
+
+      resultados.push([isPresente ? "P" : "F"]);
+      cores.push([isPresente ? config.CORES.P : config.CORES.F]);
+    }
+
+    p1.getRange(2, novaColuna, resultados.length, 1)
+      .setValues(resultados)
+      .setBackgrounds(cores);
   }
-
-  // ================================
-  // 4. MARCA PRESENÇA
-  // ================================
-  const ultimaLinhaP1 = p1.getLastRow();
-  if (ultimaLinhaP1 < 2) return;
-
-  const idsP1 = p1.getRange(2, 1, ultimaLinhaP1 - 1, 1).getValues();
-
-  const resultados = [];
-  const cores = [];
-
-  for (let i = 0; i < idsP1.length; i++) {
-    const idAtual = String(idsP1[i][0]).trim();
-    const isPresente = presentes.includes(idAtual);
-
-    resultados.push([isPresente ? "P" : "F"]);
-    cores.push([isPresente ? config.CORES.P : config.CORES.F]);
-  }
-
-  p1.getRange(2, colIndex + 1, resultados.length, 1)
-    .setValues(resultados)
-    .setBackgrounds(cores);
 }
 
 // 4. REGRA DE DESISTÊNCIA
@@ -328,8 +408,16 @@ function salvarImagem(base64, tipo, dataStr, config) {
 }
 
 function processarEnvioWeb(ss, config, lancheBase64, selfieBase64, listaBase64) {
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return "Sistema ocupado. Tente novamente.";
+  }
+
   try {
+
     const lancar = ss.getSheetByName(config.ABAS.LANCAR);
+    const dadosSheet = ss.getSheetByName(config.ABAS.DADOS);
 
     let dataAula = lancar.getRange("B4").getValue();
 
@@ -339,6 +427,44 @@ function processarEnvioWeb(ss, config, lancheBase64, selfieBase64, listaBase64) 
 
     if (isNaN(dataAula)) {
       throw new Error("Data inválida em B4.");
+    }
+
+    dataAula = new Date(
+      dataAula.getFullYear(),
+      dataAula.getMonth(),
+      dataAula.getDate()
+    );
+
+    const ultimaLinha = dadosSheet.getLastRow();
+
+    if (ultimaLinha > 1) {
+      const datasExistentes = dadosSheet
+        .getRange(2, 1, ultimaLinha - 1, 1)
+        .getValues();
+
+      const dataNovaTime = dataAula.getTime();
+
+      for (let i = 0; i < datasExistentes.length; i++) {
+
+        const dataExistente = datasExistentes[i][0];
+        if (!dataExistente) continue;
+
+        let dataComparar = dataExistente instanceof Date
+          ? dataExistente
+          : new Date(dataExistente);
+
+        if (isNaN(dataComparar)) continue;
+
+        dataComparar = new Date(
+          dataComparar.getFullYear(),
+          dataComparar.getMonth(),
+          dataComparar.getDate()
+        );
+
+        if (dataComparar.getTime() === dataNovaTime) {
+          throw new Error("Já existe presença registrada para essa data.");
+        }
+      }
     }
 
     const dataStr = Utilities.formatDate(
@@ -357,9 +483,12 @@ function processarEnvioWeb(ss, config, lancheBase64, selfieBase64, listaBase64) 
     if (selfieBase64) links.selfie = salvarImagem(selfieBase64, "selfie", dataStr, config);
     if (listaBase64)  links.lista  = salvarImagem(listaBase64,  "lista",  dataStr, config);
 
+    // 📝 AGORA salva presença
     return salvarPresenca(ss, config, links);
 
   } catch (e) {
     return "Erro no processamento: " + e.message;
+  } finally {
+    lock.releaseLock();
   }
 }
